@@ -2,11 +2,16 @@ package data
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
+	"time"
+
+	"greenlight/internal/validator"
+
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"greenlight/internal/validator"
-	"time"
 )
 
 type Movie struct {
@@ -16,7 +21,7 @@ type Movie struct {
 	Year      int32     `json:"year,omitempty"`
 	Runtime   Runtime   `json:"runtime,omitempty"`
 	Genres    []string  `json:"genres,omitempty"`
-	Version   int32     `json:"version"`
+	Version   uuid.UUID `json:"version"`
 }
 
 func ValidateMovie(v *validator.Validator, movie *Movie) {
@@ -34,7 +39,7 @@ func ValidateMovie(v *validator.Validator, movie *Movie) {
 }
 
 type MovieModel struct {
-	DB *pgxpool.Pool
+	Pool *pgxpool.Pool
 }
 
 func (m MovieModel) Insert(movie *Movie) error {
@@ -44,7 +49,11 @@ func (m MovieModel) Insert(movie *Movie) error {
 		RETURNING id, created_at, version`
 
 	args := []interface{}{movie.Title, movie.Year, movie.Runtime, movie.Genres}
-	return m.DB.QueryRow(context.Background(), query, args...).Scan(&movie.ID, &movie.CreatedAt, &movie.Version)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	return m.Pool.QueryRow(ctx, query, args...).Scan(&movie.ID, &movie.CreatedAt, &movie.Version)
 }
 
 func (m MovieModel) Get(id int64) (*Movie, error) {
@@ -59,7 +68,11 @@ func (m MovieModel) Get(id int64) (*Movie, error) {
 
 	var movie Movie
 
-	err := m.DB.QueryRow(context.Background(), query, id).Scan(
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+
+	defer cancel()
+
+	err := m.Pool.QueryRow(ctx, query, id).Scan(
 		&movie.ID,
 		&movie.CreatedAt,
 		&movie.Title,
@@ -81,11 +94,63 @@ func (m MovieModel) Get(id int64) (*Movie, error) {
 	return &movie, nil
 }
 
+func (m MovieModel) GetAll(title string, genres []string, filters Filters) ([]*Movie, Metadata, error) {
+	query := fmt.Sprintf(`
+		SELECT count(*) OVER(), id, created_at, title, year, runtime, genres, version
+		FROM movies
+		WHERE (to_tsvector('simple', title) @@ plainto_tsquery('simple', $1) OR $1 = '')
+		AND (genres @> $2 OR $2 = '{}')
+		ORDER BY %s %s, id ASC
+		LIMIT $3 OFFSET $4`, filters.sortColumn(), filters.sortDirection())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	args := []any{title, genres, filters.limit(), filters.offset()}
+
+	rows, err := m.Pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, Metadata{}, err
+	}
+
+	defer rows.Close()
+
+	totalRecords := 0
+	movies := []*Movie{}
+
+	for rows.Next() {
+		var movie Movie
+		err := rows.Scan(
+			&totalRecords,
+			&movie.ID,
+			&movie.CreatedAt,
+			&movie.Title,
+			&movie.Year,
+			&movie.Runtime,
+			&movie.Genres,
+			&movie.Version,
+		)
+
+		if err != nil {
+			return nil, Metadata{}, err
+		}
+		movies = append(movies, &movie)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, Metadata{}, err
+	}
+
+	metadata := calculateMetadata(totalRecords, filters.Page, filters.PageSize)
+
+	return movies, metadata, nil
+}
+
 func (m MovieModel) Update(movie *Movie) error {
 	query := `
 		UPDATE movies
-		SET title = $1, year = $2, runtime = $3, genres = $4, version = version + 1
-		WHERE id = $5
+		SET title = $1, year = $2, runtime = $3, genres = $4, version = uuid_generate_v4()
+		WHERE id = $5 AND version = $6
 		RETURNING version`
 
 	args := []interface{}{
@@ -94,8 +159,22 @@ func (m MovieModel) Update(movie *Movie) error {
 		movie.Runtime,
 		movie.Genres,
 		movie.ID,
+		movie.Version,
 	}
-	return m.DB.QueryRow(context.Background(), query, args...).Scan(&movie.Version)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	err := m.Pool.QueryRow(ctx, query, args...).Scan(&movie.Version)
+	if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return ErrEditConflict
+		default:
+			return err
+		}
+	}
+	return nil
 }
 
 func (m MovieModel) Delete(id int64) error {
@@ -107,7 +186,10 @@ func (m MovieModel) Delete(id int64) error {
 		DELETE FROM movies
 		WHERE id = $1`
 
-	result, err := m.DB.Exec(context.Background(), query, id)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	result, err := m.Pool.Exec(ctx, query, id)
 	if err != nil {
 		return err
 	}
@@ -126,6 +208,10 @@ func (m MockMovieModel) Insert(movie *Movie) error {
 }
 func (m MockMovieModel) Get(id int64) (*Movie, error) {
 	return nil, nil
+}
+
+func (m MockMovieModel) GetAll(title string, genres []string, filters Filters) ([]*Movie, Metadata, error) {
+	return nil, Metadata{}, nil
 }
 func (m MockMovieModel) Update(movie *Movie) error {
 	return nil
