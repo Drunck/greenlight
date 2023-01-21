@@ -3,10 +3,8 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"greenlight/internal/data"
 	"greenlight/internal/jsonlog"
-	"net/http"
 	"os"
 	"time"
 
@@ -16,10 +14,10 @@ import (
 const version = "1.0.0"
 
 type config struct {
-	// port int
-	port string
-	env  string
-	db   struct {
+	port int
+	//port string
+	env string
+	db  struct {
 		dsn          string
 		maxOpenConns int
 		//maxIdleConns int
@@ -41,7 +39,9 @@ type application struct {
 func main() {
 	var cfg config
 
-	flag.StringVar(&cfg.port, "port", "localhost:4000", "API server port")
+	//flag.StringVar(&cfg.port, "port", "localhost:4000", "API server port")
+
+	flag.IntVar(&cfg.port, "port", 4000, "API server port")
 	flag.StringVar(&cfg.env, "env", "development", "Environment (development|staging|production)")
 	flag.StringVar(&cfg.db.dsn, "db-dsn", os.Getenv("GREENLIGHT_DB_DSN"), "PostgreSQL DSN")
 	flag.IntVar(&cfg.db.maxOpenConns, "db-max-open-conns", 25, "PostgreSQL max open connections")
@@ -71,21 +71,11 @@ func main() {
 		models: data.NewModels(db),
 	}
 
-	srv := &http.Server{
-		Addr:         fmt.Sprintf("%v", cfg.port),
-		Handler:      app.routes(),
-		IdleTimeout:  time.Minute,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 30 * time.Second,
+	err = app.serve()
+	if err != nil {
+		logger.PrintFatal(err, nil)
 	}
 
-	logger.PrintInfo("starting server", map[string]string{
-		"addr": srv.Addr,
-		"env":  cfg.env,
-	})
-
-	err = srv.ListenAndServe()
-	logger.PrintFatal(err, nil)
 }
 
 func openDB(cfg config) (*pgxpool.Pool, error) {

@@ -19,16 +19,23 @@ type Models struct {
 		Update(movie *Movie) error
 		Delete(id int64) error
 	}
+	Users interface {
+		Insert(user *User) error
+		GetByEmail(email string) (*User, error)
+		Update(user *User) error
+	}
 }
 
 func NewModels(db *pgxpool.Pool) Models {
 	return Models{
 		Movies: MovieModel{Pool: db},
+		Users:  UserModel{Pool: db},
 	}
 }
 
 func NewMockModels() Models {
 	return Models{
 		Movies: MockMovieModel{},
+		Users:  MockUserModel{},
 	}
 }
