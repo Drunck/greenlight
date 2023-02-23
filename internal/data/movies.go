@@ -2,7 +2,6 @@ package data
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -168,7 +167,7 @@ func (m MovieModel) Update(movie *Movie) error {
 	err := m.Pool.QueryRow(ctx, query, args...).Scan(&movie.Version)
 	if err != nil {
 		switch {
-		case errors.Is(err, sql.ErrNoRows):
+		case errors.Is(err, pgx.ErrNoRows):
 			return ErrEditConflict
 		default:
 			return err
